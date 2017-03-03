@@ -1,0 +1,136 @@
+---
+title: "pamr data fit for BRCA cancer"
+output:
+  pdf_document: default
+  html_document: default
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+ #PAMR model fitting for expression and clinical data
+Training data was all but the last three rows from our data. The last three rows of the data were used as test set. </p>
+ 
+```{r data import and process, include=FALSE}  
+library(pamr)
+i="BRCA"
+delta =10
+expression1 = t(read.table(list.files("~/Desktop/labRotation1_AnubhavK/gene_expression/",pattern=i,full.names = T),header=T,sep="\t",row.names=1))[,-1]
+
+clinical = t(read.table(list.files("~/Desktop/labRotation1_AnubhavK/Clinical_Firehose/",pattern=i,full.names = T),header=T,sep="\t",row.names = 1))[,-1]
+
+significant_genes =  read.csv(list.files("/home/pathway/Desktop/labRotation1_AnubhavK/New_results_pendrive_backup/significant_survival_ranked_Common_genes/",pattern = i, full.names = T)[1])
+
+event = c() #To have all the events coded in 0 or 1
+
+days_to_death = c() #days to death, if not, then follow-up data
+
+expression_rna = t(apply(expression1,1,as.numeric)) #TO eliminate factor problems
+
+#total_gene_list = colnames(expression1) #Obtaining all the genes in the sample
+
+rownames(expression_rna) <- as.vector(sapply(rownames(expression1), function(x) tolower(paste(unlist(strsplit(x,"\\."))[[1]],unlist(strsplit(x,"\\."))[[2]],unlist(strsplit(x,"\\."))[[3]],sep="."))))#To keep all the rows in small letters
+
+colnames(expression_rna) = colnames(expression1)  ##############
+
+rm(expression1)  ################
+
+expression_rna_countMorethanZero = expression_rna[,which(apply(expression_rna, 2, median) >= 0.1)]  ####to filter out gene that have counts less than 0.1 in 50 or more of the sample.
+
+expression_rna_log2 = log2(t(apply(t(apply(expression_rna_countMorethanZero,1,as.numeric)), 1, function(i) i+1 ))) ### Log2 transform of the filtered gene counts
+
+colnames(expression_rna_log2) = colnames(expression_rna_countMorethanZero) #################
+
+match_index = which(rownames(clinical)%in% rownames(expression_rna_log2)) #Check which patient ID are matching with the tumor data
+
+clinical_match=as.data.frame(clinical[match_index,]) #filter the clinical match. There are Normal patients as well so less mathches
+
+
+#genes_survival_pval=data.frame() #storing p values in a data frame
+
+for ( i in 1:length(as.character(clinical_match$days_to_death))) #Take follow-day where death days are not available
+{
+  days_to_death[i] = ifelse(is.na(as.character(clinical_match$days_to_death)[i]),as.numeric(as.character(clinical_match$days_to_last_followup))[i],as.numeric(as.character(clinical_match$days_to_death))[i])
+  
+  event[i] = as.numeric(as.character(clinical_match$vital_status))[i]
+}
+
+rm(clinical)
+
+clinical_survival = as.data.frame(cbind(days_to_death,event)) #Create a data frame for survival fit analysis
+
+rownames(clinical_survival)= rownames(clinical_match)#Matching rownames
+
+expression_rna_ordered_log2_median = expression_rna_log2[rownames(clinical_survival),] #Creating expression matrix ordered according to rownames of clinical_match
+
+rm(expression_rna,expression_rna_countMorethanZero,match_index,expression_rna_log2,event, days_to_death,clinical_match)
+Survival_times = sapply(as.numeric(clinical_survival$days_to_death), function(x)x/(30*12))
+clinical_survival = cbind(Survival_times, clinical_survival)
+
+###########################################################################
+clinical_survival[which(is.na(clinical_survival$days_to_death)),] = 0
+clinical_survival_clean = clinical_survival[-(which(clinical_survival$days_to_death == 0)),]
+p = rownames(clinical_survival_clean)
+expression_rna_ordered_log2_median_clean = expression_rna_ordered_log2_median[p,]
+##########################################################################
+
+Significant_expression_matrix = matrix()
+index =c()
+
+genes = sapply(as.vector(colnames(expression_rna_ordered_log2_median_clean)),function(x)unlist(strsplit(x,"\\|"))[1])
+
+for (i in as.vector(significant_genes$common_Expre_Mut_genes)){
+  
+  value = grep(paste("^",i,"\\b",sep=""), as.vector(genes))
+  if(length(value) == 1)index=c(value, index)
+}
+
+index=index[order(index)]
+Significant_expression_matrix = as.data.frame(expression_rna_ordered_log2_median_clean[,index])
+ 
+test_data_expression  = Significant_expression_matrix[-(1:(length(rownames(Significant_expression_matrix))-3)),]
+
+training_data_expression  = Significant_expression_matrix[1:(length(rownames(Significant_expression_matrix))-3),]
+
+clinical_survival_training = clinical_survival_clean[(1:(length(rownames(clinical_survival_clean))-3)),]
+
+clinical_survival_test = clinical_survival_clean[-(1:(length(rownames(clinical_survival_clean))-3)),]
+
+rm(Survival_times, index, value, Significant_expression_matrix, expression_rna_ordered_log2_median_clean)
+
+```
+
+```{r pamr modelling,fig.width=16, fig.height=6,tidy=TRUE, tidy.opts=list(width.cutoff=50)}
+cancer_survival_training_pamr = list(x = as.matrix(t(training_data_expression)), survival.time = clinical_survival_training$Survival_times,censoring.status = clinical_survival_training$event, genenames  = colnames(training_data_expression))
+
+cancer_survival_test_pamr = list(x = as.matrix(t(test_data_expression)), survival.time = clinical_survival_test$Survival_times,censoring.status = clinical_survival_test$event, genenames  = colnames(test_data_expression) )
+
+survival_train_model = pamr.train(cancer_survival_training_pamr, ngroup.survival = 2)
+survival_train_model
+survival_train_model.Cross_Val = pamr.cv(fit = survival_train_model, data = cancer_survival_training_pamr, nfold = 10)
+survival_train_model.Cross_Val
+
+pamr.plotcv(survival_train_model.Cross_Val)
+pamr.confusion(fit = survival_train_model.Cross_Val, delta)
+pamr.plotcvprob(survival_train_model.Cross_Val, cancer_survival_training_pamr, delta)
+
+```
+
+```{r confusion and survival plots, fig.width=16,tidy=TRUE, tidy.opts=list(width.cutoff=60) }
+pamr.plotsurvival(group = as.factor(survival_train_model$yhat[,2]), survival.time = cancer_survival_training_pamr$survival.time, censoring.status = cancer_survival_training_pamr$censoring.status)
+```
+
+#Predicting on the test data set. 
+
+```{r predicting on test data set, fig.width=16,tidy=TRUE, tidy.opts=list(width.cutoff=60) }
+pamr.predict(survival_train_model, cancer_survival_test_pamr$x, threshold = delta)
+``` 
+ 
+#ROC curve for one of the prediction for class '2'
+ 
+#```{r ROC Curve, fig.width = 16,tidy=TRUE, tidy.opts=list(width.cutoff=70)}
+#library(ROCR)
+#fold1 = survival_train_model.Cross_Val$folds[[4]]
+#Roc_prediction = prediction(survival_train_model.Cross_Val$prob[fold1,2,5], #survival_train_model$yhat[fold1,22])
+# roc.curve = performance(Roc_prediction,"tpr","fpr")
+#plot(roc.curve)
+#```
